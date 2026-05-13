@@ -1,0 +1,65 @@
+version: "3.8"
+
+services:
+  libraryit-server:
+    build: .
+    container_name: libraryit-server
+    ports:
+      - "1445:445"
+    volumes:
+      - ./data/ebooks:/libraryit/ebooks
+      - ./data/papers:/libraryit/papers
+      - ./data/sourcecode:/libraryit/sourcecode
+      - ./data/docs:/libraryit/docs
+      - ./logs:/logs
+    restart: unless-stopped
+
+  libraryit-logger:
+    image: alpine:3.20
+    container_name: libraryit-logger
+    depends_on:
+      - libraryit-server
+    volumes:
+      - ./logs:/logs
+    command:
+      - /bin/sh
+      - -c
+      - |
+          set -e
+          mkdir -p /logs
+          touch /logs/samba_audit.log /logs/libraryit.log
+          printf '%s\n' \
+            'function action_from_op(op) {' \
+            '  op = tolower(op);' \
+            '  if (op == "connect" || op == "connectpath") return "CONNECT";' \
+            '  if (op == "disconnect") return "DISCONNECT";' \
+            '  if (op ~ /(write|pwrite|create|mkdir|rmdir|rename|unlink|ftruncate)/) return "WRITE";' \
+            '  if (op ~ /(read|pread|open|opendir|readdir|stat|lstat|get|list|realpath)/) return "READ";' \
+            '  return toupper(op);' \
+            '}' \
+            'function format_time(raw) {' \
+            '  gsub(/[^0-9]/, "", raw);' \
+            '  return substr(raw, 1, 4) "-" substr(raw, 5, 2) "-" substr(raw, 7, 2) " " substr(raw, 9, 2) ":" substr(raw, 11, 2) ":" substr(raw, 13, 2);' \
+            '}' \
+            '{' \
+            '  if ($0 !~ /^[[:space:]]*[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]\|/) next;' \
+            '  line = $0;' \
+            '  sub(/^[[:space:]]+/, "", line);' \
+            '  n = split(line, f, "|");' \
+            '  if (n < 5) next;' \
+            '  time = format_time(f[1]);' \
+            '  user = f[2];' \
+            '  share = f[3];' \
+            '  op = f[4];' \
+            '  result_ok = (line ~ /\|ok(\||$)/);' \
+            '  level = result_ok ? "INFO" : "WARNING";' \
+            '  action = result_ok ? action_from_op(op) : "DENIED";' \
+            '  file = f[n];' \
+            '  target = (file != "" && file != "(null)") ? file : share;' \
+            '  gsub(/^[[:space:]]+|[[:space:]]+$/, "", target);' \
+            '  printf("[%s] [%s] [%s] [%s] [%s]\n", time, level, user, action, target);' \
+            '  fflush();' \
+            '}' \
+            > /tmp/format.awk
+          tail -f /logs/samba_audit.log | awk -f /tmp/format.awk | tee -a /logs/libraryit.log
+    restart: unless-stopped
