@@ -26,7 +26,6 @@ static void get_enc_path(char *fpath, const char *path) {
     if (lstat(temp, &st) == 0 && S_ISDIR(st.st_mode)) {
         strcpy(fpath, temp);
     } else {
-        // Jika bukan direktori atau belum ada, asumsikan file dan tambahkan .enc
         sprintf(fpath, "%s%s.enc", dirpath, path);
     }
 }
@@ -76,7 +75,7 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_
 
 static int xmp_mkdir(const char *path, mode_t mode) {
     char fpath[1000];
-    sprintf(fpath, "%s%s", dirpath, path); // Direktori tidak pakai .enc
+    sprintf(fpath, "%s%s", dirpath, path);
     int res = mkdir(fpath, mode);
     if (res == -1) return -errno;
     return 0;
@@ -119,7 +118,7 @@ static int xmp_read(const char *path, char *buf, size_t size, off_t offset, stru
     if (res == -1) {
         res = -errno;
     } else {
-        xor_cipher(buf, res); // Dekripsi hasil baca
+        xor_cipher(buf, res);
     }
 
     close(fd);
