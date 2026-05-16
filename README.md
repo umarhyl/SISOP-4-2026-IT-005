@@ -18,7 +18,16 @@
 │   ├── fuse_mount/
 │   └── server
 ├── soal_3/
-│   └── ...
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── entrypoint.sh
+│   ├── logs/
+│   |   └── libraryit.log
+|   └── data/
+|       ├── docs/
+|       ├── ebooks/
+|       ├── papers/
+|       └── sourcecode/
 ├── assets/
 └── README.md
 ```
@@ -243,3 +252,301 @@ Unmount FUSE setelah selesai
 ![unmount_fuse](assets/soal_2/3.png)
 
 # Soal 3 - LibraryIT
+
+Pada soal nomor 3 diminta untuk membuat sebuah sistem logging LibraryIT. Sistem ini harus mampu mencatat semua aktivitas pengguna, termasuk login, logout, pencarian buku, peminjaman, dan pengembalian buku. Log harus disimpan dalam format yang terstruktur dan mudah dianalisis.
+
+Server Samba berjalan di dalam container docker dengan 4 ruang penyimpanan (ebooks, papers, sourcecode, docs) yang punya aturan akses berbeda, user/group otomatis, data persisten di host, serta logging aktivitas yang dapat dipantau real-time. Implementasi ada pada [Dockerfile](soal_3/Dockerfile), [docker-compose.yml](soal_3/docker-compose.yml), [smb.conf](soal_3/smb.conf), dan [entrypoint.sh](soal_3/entrypoint.sh).
+
+## Ringkasan Konfigurasi
+
+- Share yang tersedia: `ebooks`, `papers`, `sourcecode`, `docs` di `/libraryit`.
+- User dan grup:
+    - `member` (password `member123`) -> grup `readonly`.
+    - `contributor` (password `contrib456`) -> grup `staff`.
+    - `librarian` (password `lib789`) -> grup `staff` dan `docswriter`.
+- Akses:
+    - `ebooks` dan `papers`: `staff` read/write, `readonly` read-only.
+    - `sourcecode`: hanya `staff`, tidak terlihat oleh `readonly`.
+    - `docs`: semua bisa read, hanya `librarian` yang boleh write.
+- Data koleksi dan log disimpan di host melalui bind-mount.
+- Logging aktivitas menggunakan `vfs_full_audit` lalu diparsing jadi format sesuai soal.
+
+## Struktur dan Alur Eksekusi
+
+1. Docker Compose menjalankan service `libraryit-server` terlebih dahulu.
+2. Container mengeksekusi [entrypoint.sh](entrypoint.sh):
+     - Membuat user/group.
+     - Menyiapkan izin folder koleksi.
+     - Menyalakan `rsyslog` untuk menerima audit log.
+     - Menjalankan `smbd` dan `nmbd`.
+     - Memproses audit log menjadi `libraryit.log`.
+3. Service `libraryit-logger` menampilkan log real-time dengan `tail -F`.
+
+## Dockerfile
+
+```Dockerfile
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+        && apt-get install -y --no-install-recommends samba samba-common-bin samba-vfs-modules smbclient rsyslog acl \
+        && rm -rf /var/lib/apt/lists/*
+
+COPY smb.conf /etc/samba/smb.conf
+COPY entrypoint.sh /entrypoint.sh
+
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 445
+
+ENTRYPOINT ["/entrypoint.sh"]
+```
+
+`samba-vfs-modules` untuk modul `vfs_full_audit` tersedia,`rsyslog` dipakai untuk menulis audit log dari Samba ke file, `acl` dipakai untuk pengaturan hak akses detail (ACL) pada folder data.
+
+## docker-compose.yml
+
+```yaml
+services:
+    libraryit-server:
+        container_name: libraryit-server
+        build: .
+        ports:
+            - "445:445"
+        volumes:
+            - ./data/ebooks:/libraryit/ebooks
+            - ./data/papers:/libraryit/papers
+            - ./data/sourcecode:/libraryit/sourcecode
+            - ./data/docs:/libraryit/docs
+            - ./logs:/libraryit/logs
+        restart: unless-stopped
+
+    libraryit-logger:
+        container_name: libraryit-logger
+        image: alpine:3.20
+        depends_on:
+            libraryit-server:
+                condition: service_started
+        volumes:
+            - ./logs:/logs:ro
+        command: ["sh", "-c", "tail -F /logs/libraryit.log"]
+        restart: unless-stopped
+```
+
+Semua data dan log dipetakan ke host, sehingga data persisten. `libraryit-logger` hanya membaca log (`:ro`) dan bisa dipantau via `docker logs -f libraryit-logger`.
+
+## smb.conf (detail)
+
+Dalam pengerjaan soal ini, konfigurasi `smb.conf` menggunakan modul `vfs_full_audit` untuk mencatat semua aktivitas pengguna. Log yang dihasilkan kemudian diproses oleh `rsyslog` untuk disimpan dalam format yang sesuai dengan kebutuhan soal.
+
+Referensi resmi modul audit dan konfigurasi Samba:
+- `vfs_full_audit`: https://www.samba.org/samba/docs/current/man-html/vfs_full_audit.8.html
+- `smb.conf`: https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html
+
+
+### Bagian [global]
+
+```conf
+[global]
+    security = user
+    map to guest = never
+    server role = standalone server
+    hide unreadable = yes
+    inherit acls = yes
+    map acl inherit = yes
+
+    vfs objects = full_audit
+    full_audit:prefix = %u|%S|%a|%p
+    full_audit:success = all
+    full_audit:failure = all
+    full_audit:facility = LOCAL7
+    full_audit:priority = NOTICE
+```
+
+Konfigurasi ini dibuat ketat biar akses selalu pakai user (`security = user`, `map to guest = never`), server tetap standalone, dan share yang tidak boleh dibaca disembunyikan lewat `hide unreadable = yes`. Pewarisan ACL diaktifkan dengan `inherit acls = yes` dan `map acl inherit = yes` supaya file/folder baru otomatis ikut aturan induknya. Audit dihidupkan lewat `vfs objects = full_audit`, lalu prefix `full_audit:prefix = %u|%S|%a|%p` disusun biar gampang diparse karena sudah memuat user, share, arsitektur, dan path. Dengan `full_audit:success = all` dan `full_audit:failure = all`, semua event sukses/gagal dikirim ke syslog facility `LOCAL7` pada priority `NOTICE` lalu ditangkap `rsyslog` ke file audit mentah. Log per-klien tetap disimpan lewat `log file = /var/log/samba/log.%m` supaya penolakan saat `tree connect` bisa tertangkap, `log level = 1` dijaga rendah biar tetap informatif tanpa terlalu ramai, dan fitur print server dimatiin lewat `disable spoolss = yes` serta `load printers = no` karena memang tidak dipakai.
+
+### Share `ebooks` dan `papers`
+
+```conf
+[ebooks]
+    path = /libraryit/ebooks
+    valid users = @staff @readonly
+    read only = yes
+    write list = @staff
+    browseable = yes
+    force group = staff
+    create mask = 0664
+    directory mask = 2775
+```
+
+Di `ebooks` dan `papers`, kombinasi `read only = yes` dan `write list = @staff` bikin hanya `staff` yang bisa nulis. `force group = staff` serta `directory mask = 2775` menjaga group owner konsisten sekaligus mempertahankan setgid supaya subfolder tetap mewarisi group `staff`. `create mask = 0664` memberi read/write untuk owner dan group serta read untuk other, dan `directory mask = 2775` menambah bit setgid (2) biar pewarisan group tetap jalan di folder baru.
+
+Ringkasan
+---
+- `read only = yes` lalu `write list = @staff` membuat hanya `staff` yang boleh menulis.
+- `force group = staff` dan `directory mask = 2775` menjaga group owner dan setgid tetap konsisten.
+- `create mask = 0664` membuat file baru punya read/write untuk owner dan group, read untuk others.
+- `directory mask = 2775` menambahkan bit setgid (2) agar subfolder mewarisi group `staff`.
+
+### Share `sourcecode`
+
+```conf
+[sourcecode]
+    path = /libraryit/sourcecode
+    valid users = @staff
+    read only = no
+    browseable = no
+    force group = staff
+    create mask = 0660
+    directory mask = 2770
+```
+
+Di `sourcecode`, `valid users = @staff` menolak akses selain `staff`, dan `browseable = no` membuat share ini tidak terlihat oleh user `readonly` saat enumerasi. `create mask = 0660` dan `directory mask = 2770` memastikan tidak ada akses untuk `other`, sesuai requirement permission 750 di host.
+
+### Share `docs`
+
+```conf
+[docs]
+    path = /libraryit/docs
+    valid users = @staff @readonly
+    read only = yes
+    write list = @docswriter
+    browseable = yes
+    force group = staff
+    create mask = 0664
+    directory mask = 2775
+```
+
+Di `docs`, semua user bisa membaca, tapi hanya grup `docswriter` yang boleh menulis, dan grup ini isinya cuma user `librarian`. Kuncinya ada di `read only = yes` dipadukan dengan `write list = @docswriter` supaya hak write tetap eksklusif untuk `librarian`.
+
+## entrypoint.sh
+
+### 1. Setup folder koleksi dan permission
+
+Contoh untuk `docs`:
+
+```bash
+chown -R root:staff "${LIB_ROOT}/docs"
+chmod 0550 "${LIB_ROOT}/docs"
+apply_acls "${LIB_ROOT}/docs" \
+    g:staff:rx d:g:staff:rx \
+    g:readonly:rx d:g:readonly:rx \
+    g:docswriter:rwx d:g:docswriter:rwx
+```
+
+`docs` dibuat read-only secara default, tapi ACL memberi write khusus untuk `docswriter` (hanya `librarian`). Karena folder ini bind-mount, permission itu langsung berlaku di host.
+
+Untuk folder lain, `ebooks` dan `papers` diberi group `staff` dengan `chmod 2770` sehingga hanya `staff` dan `readonly` (via ACL) yang bisa akses, sedangkan `sourcecode` memakai `chmod 0750` agar hanya owner (`root`) dan group (`staff`) yang bisa akses, sesuai syarat permission 750. ACL `d:g:*` dipakai supaya permission untuk file baru otomatis mengikuti rule yang sama.
+
+### 2. Rsyslog untuk audit log
+
+```bash
+cat >/etc/rsyslog.d/libraryit.conf <<'CONF'
+module(load="imuxsock")
+module(load="imklog")
+$template LibraryITRaw,"%msg%\n"
+if ($syslogfacility-text == "local7") then {
+    action(type="omfile" file="/var/log/libraryit_audit.log" template="LibraryITRaw")
+    stop
+}
+CONF
+
+rsyslogd
+```
+
+`vfs_full_audit` mengirim log ke syslog facility `LOCAL7`, lalu rsyslog menuliskannya ke `/var/log/libraryit_audit.log` supaya mudah diproses.
+
+### 3. Parsing audit log ke format soal
+
+```bash
+tail -n 0 -F "$RAW_LOG" | while read -r line; do
+    ...
+    printf '[%s] [%s] [%s] [%s] [%s]\n' "$ts" "$level" "$user" "$action_out" "$target" >> "$OUT_LOG"
+done &
+```
+
+Parser ini cuma memproses share yang valid (`ebooks`, `papers`, `sourcecode`, `docs`) dan membatasi aksi ke `CONNECT`, `DISCONNECT`, `WRITE`, serta `DENIED` biar output tetap ringkas. Kegagalan non-akses seperti file tidak ditemukan diabaikan supaya tidak muncul `WARNING` palsu, dan nama file dibersihkan dari path maupun token lain agar format output sesuai ketentuan soal.
+
+### 4. Denied akses share (tree connect)
+
+```bash
+tail -n 0 -F /var/log/samba/log.* | while read -r line; do
+    case "$line" in
+        *"not permitted to access this share ("*)
+            ...
+            printf '[%s] [WARNING] [%s] [DENIED] [%s]\n' "$ts" "$user" "$share" >> "$OUT_LOG"
+            ;;
+    esac
+done &
+```
+
+Penolakan akses share kadang tidak tercatat di `vfs_full_audit`, jadi log Samba per-klien (`/var/log/samba/log.*`) ikut dipantau untuk menangkap `NT_STATUS_ACCESS_DENIED` saat `tree connect` gagal.
+
+Format yang ditangkap di log per-klien terlihat seperti berikut:
+
+```
+create_connection_session_info: user 'member' ... not permitted to access this share (sourcecode)
+```
+
+Parser kemudian mengambil `user` dan `share`, lalu menulis `DENIED` ke log utama.
+
+### 5. Menjalankan Samba
+
+```bash
+nmbd -D
+smbd -F --no-process-group -s /etc/samba/smb.conf
+```
+
+`nmbd` dipakai untuk layanan NetBIOS, sedangkan `smbd` sengaja jalan di foreground supaya container tetap hidup.
+
+## Contoh Log
+
+Contoh output yang dihasilkan pada [soal_3/logs/libraryit.log](soal_3/logs/libraryit.log):
+
+```log
+[2026-05-16 11:55:44] [INFO] [librarian] [CONNECT] [ebooks]
+[2026-05-16 11:55:44] [INFO] [librarian] [WRITE] [test.txt]
+[2026-05-16 11:55:44] [INFO] [librarian] [DISCONNECT] [ebooks]
+[2026-05-16 11:56:01] [INFO] [member] [CONNECT] [docs]
+[2026-05-16 11:56:01] [WARNING] [member] [DENIED] [docs]
+[2026-05-16 11:56:01] [INFO] [member] [DISCONNECT] [docs]
+```
+
+## Proof Of Concept
+
+```bash
+smbclient //localhost/ebooks -U member%member123 -c 'put test.txt'
+smbclient //localhost/ebooks -U contributor%contrib456 -c 'put test.txt'
+smbclient //localhost/ebooks -U librarian%lib789 -c 'put test.txt'
+
+smbclient //localhost/papers -U member%member123 -c 'put test.txt'
+
+smbclient //localhost/sourcecode -U contributor%contrib456 -c 'put test.txt'
+smbclient //localhost/sourcecode -U librarian%lib789 -c 'put test.txt'
+
+smbclient //localhost/docs -U member%member123 -c 'ls'
+smbclient //localhost/docs -U librarian%lib789 -c 'put test.txt'
+```
+
+## Screenshot
+
+#### Percobaan akses share dan file
+![1](assets/soal_3/1.png)
+
+#### Log real-time
+![2](assets/soal_3/2.png)
+
+#### Cek user/group & share
+![3](assets/soal_3/3.png)
+
+#### Test readonly
+![4](assets/soal_3/4.png)
+
+#### Test librarian write
+![5](assets/soal_3/5.png)
+
+
+## Referensi
+
+- https://github.com/lab-kcks/Modul-Sisop/tree/main/Modul-4
+- https://www.samba.org/samba/docs/current/man-html/vfs_full_audit.8.html
+- https://www.samba.org/samba/docs/current/man-html/smb.conf.5.html
