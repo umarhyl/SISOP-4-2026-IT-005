@@ -1,96 +1,189 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+LIB_ROOT="/libraryit"
+LOG_DIR="${LIB_ROOT}/logs"
+RAW_LOG="/var/log/libraryit_audit.log"
+OUT_LOG="${LOG_DIR}/libraryit.log"
+
 ensure_group() {
   local group="$1"
-  if ! getent group "$group" >/dev/null 2>&1; then
-    groupadd -r "$group"
+  if ! getent group "$group" >/dev/null; then
+    groupadd "$group"
   fi
 }
 
 ensure_user() {
   local user="$1"
   local group="$2"
-  local pass="$3"
-
-  if ! id -u "$user" >/dev/null 2>&1; then
+  if ! id "$user" >/dev/null 2>&1; then
     useradd -M -s /usr/sbin/nologin -g "$group" "$user"
-  else
-    usermod -g "$group" "$user"
   fi
-
-  echo "$user:$pass" | chpasswd
 }
 
-ensure_smb_user() {
+set_smb_pass() {
   local user="$1"
   local pass="$2"
-
-  if pdbedit -L 2>/dev/null | cut -d: -f1 | grep -qx "$user"; then
-    printf "%s\n%s\n" "$pass" "$pass" | smbpasswd -s "$user"
-  else
-    printf "%s\n%s\n" "$pass" "$pass" | smbpasswd -a -s "$user"
-  fi
+  (echo "$pass"; echo "$pass") | smbpasswd -s -a "$user" >/dev/null
+  smbpasswd -e "$user" >/dev/null
 }
+
+apply_acls() {
+  local path="$1"
+  shift
+  setfacl -R -b "$path"
+  for rule in "$@"; do
+    setfacl -R -m "$rule" "$path"
+  done
+  setfacl -R -m m:rwx "$path"
+}
+
+mkdir -p \
+  "${LIB_ROOT}/ebooks" \
+  "${LIB_ROOT}/papers" \
+  "${LIB_ROOT}/sourcecode" \
+  "${LIB_ROOT}/docs" \
+  "${LOG_DIR}"
+
+touch "$OUT_LOG" "$RAW_LOG"
+chmod 0644 "$OUT_LOG"
 
 ensure_group readonly
 ensure_group staff
-ensure_group librarian
+ensure_group docswriter
 
-ensure_user member readonly member123
-ensure_user contributor staff contrib456
-ensure_user librarian staff lib789
+ensure_user member readonly
+ensure_user contributor staff
+ensure_user librarian staff
+usermod -aG docswriter librarian
 
-usermod -aG librarian librarian
+set_smb_pass member member123
+set_smb_pass contributor contrib456
+set_smb_pass librarian lib789
 
-ensure_smb_user member member123
-ensure_smb_user contributor contrib456
-ensure_smb_user librarian lib789
+chown -R root:staff "${LIB_ROOT}/ebooks" "${LIB_ROOT}/papers"
+chmod 2770 "${LIB_ROOT}/ebooks" "${LIB_ROOT}/papers"
+apply_acls "${LIB_ROOT}/ebooks" \
+  g:staff:rwx d:g:staff:rwx \
+  g:readonly:rx d:g:readonly:rx
+apply_acls "${LIB_ROOT}/papers" \
+  g:staff:rwx d:g:staff:rwx \
+  g:readonly:rx d:g:readonly:rx
 
-mkdir -p /libraryit/ebooks /libraryit/papers /libraryit/sourcecode /libraryit/docs /logs /run/samba
+chown -R root:staff "${LIB_ROOT}/sourcecode"
+chmod 0750 "${LIB_ROOT}/sourcecode"
+apply_acls "${LIB_ROOT}/sourcecode" \
+  g:staff:rwx d:g:staff:rwx
 
-cat > /usr/local/bin/libraryit-preexec.sh <<'SH'
-#!/bin/sh
-set -e
+chown -R root:staff "${LIB_ROOT}/docs"
+chmod 0550 "${LIB_ROOT}/docs"
+apply_acls "${LIB_ROOT}/docs" \
+  g:staff:rx d:g:staff:rx \
+  g:readonly:rx d:g:readonly:rx \
+  g:docswriter:rwx d:g:docswriter:rwx
 
-user="$1"
-share="$2"
-log_file="/logs/samba_audit.log"
+cat >/etc/rsyslog.d/libraryit.conf <<'CONF'
+module(load="imuxsock")
+module(load="imklog")
+$template LibraryITRaw,"%msg%\n"
+if ($syslogfacility-text == "local7") then {
+  action(type="omfile" file="/var/log/libraryit_audit.log" template="LibraryITRaw")
+  stop
+}
+CONF
 
-if [ -z "$user" ] || [ -z "$share" ]; then
-  exit 0
-fi
+rsyslogd
 
-if [ "$share" = "IPC$" ]; then
-  exit 0
-fi
-
-ts=$(date +%Y%m%d_%H%M%S)
-
-if [ "$share" = "sourcecode" ]; then
-  if ! id -nG "$user" | tr ' ' '\n' | grep -qx staff; then
-    printf "%s|%s|%s|connect|fail|%s\n" "$ts" "$user" "$share" "$share" >> "$log_file"
-    exit 1
+tail -n 0 -F "$RAW_LOG" | while read -r line; do
+  msg="$line"
+  if [[ "$line" == *"smbd_audit:"* ]]; then
+    msg="${line#*smbd_audit: }"
   fi
-fi
 
-printf "%s|%s|%s|connect|ok|%s\n" "$ts" "$user" "$share" "$share" >> "$log_file"
-exit 0
-SH
+  IFS='|' read -r f1 f2 f3 f4 f5 f6 f7 f8 <<< "$msg"
+  action="${f5:-}"
+  result="${f6:-}"
+  if [[ -z "$action" || -z "$result" ]]; then
+    continue
+  fi
 
-chmod +x /usr/local/bin/libraryit-preexec.sh
+  user="${f1:-unknown}"
+  share="${f2:-}"
+  target="${f7:-$share}"
+  level="INFO"
+  if [[ "$result" != ok* && "$result" != OK* ]]; then
+    if echo "$result" | grep -qiE 'fail|error|ACCESS_DENIED|NT_STATUS_ACCESS_DENIED|Permission denied|denied'; then
+      level="WARNING"
+    else
+      continue
+    fi
+  fi
 
-touch /logs/samba_audit.log /logs/libraryit.log
+  case "$share" in
+    ebooks|papers|sourcecode|docs) ;;
+    *) continue ;;
+  esac
 
-# Normalize permissions for group-based access rules.
-chown -R root:staff /libraryit/ebooks /libraryit/papers /libraryit/sourcecode
-chmod 2775 /libraryit/ebooks /libraryit/papers
-chmod 0750 /libraryit/sourcecode
+  if [[ "$level" == "WARNING" ]]; then
+    case "$action" in
+      connect|open|openat|create_file|mknod|mkdir|rename|renameat|unlink|unlinkat|rmdir|write|pwrite|pwrite_send) ;;
+      *) continue ;;
+    esac
+    action_out="DENIED"
+    target="$share"
+  else
+    case "$user" in
+      member|contributor|librarian) ;;
+      *) continue ;;
+    esac
 
-# Keep docs read-only on host while allowing Samba to gate writes.
-chown -R root:staff /libraryit/docs
-chmod 0555 /libraryit/docs
-setfacl -m g:librarian:rwx /libraryit/docs
-setfacl -m d:g:librarian:rwx /libraryit/docs
+    case "$action" in
+      connect)
+        action_out="CONNECT"
+        target="$share"
+        ;;
+      disconnect)
+        action_out="DISCONNECT"
+        target="$share"
+        ;;
+      write|pwrite|pwrite_send)
+        action_out="WRITE"
+        target="$f7"
+        ;;
+      *)
+        continue
+        ;;
+    esac
 
-exec smbd -F --no-process-group
+    case "$target" in
+      ""|r|w|rw|wr|r+|w+|a|a+|0x*|*:* ) continue ;;
+    esac
+
+    target="${target##*/}"
+  fi
+
+  ts=$(date '+%Y-%m-%d %H:%M:%S')
+  printf '[%s] [%s] [%s] [%s] [%s]\n' "$ts" "$level" "$user" "$action_out" "$target" >> "$OUT_LOG"
+done &
+
+tail -n 0 -F /var/log/samba/log.* | while read -r line; do
+  case "$line" in
+    *"not permitted to access this share ("*)
+      user="${line#*user '}"
+      user="${user%%'*}"
+      share="${line##*(}"
+      share="${share%%)*}"
+      
+      case "$share" in
+        ebooks|papers|sourcecode|docs) ;;
+        *) continue ;;
+      esac
+      
+      ts=$(date '+%Y-%m-%d %H:%M:%S')
+      printf '[%s] [WARNING] [%s] [DENIED] [%s]\n' "$ts" "$user" "$share" >> "$OUT_LOG"
+      ;;
+  esac
+done &
+
+nmbd -D
+smbd -F --no-process-group -s /etc/samba/smb.conf
