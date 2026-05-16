@@ -5,16 +5,15 @@
 #include <arpa/inet.h>
 
 #define PORT 9000
-#define BUFFER_SIZE 2048
 
 int main() {
     int sock = 0;
     struct sockaddr_in serv_addr;
-    char buffer[BUFFER_SIZE] = {0};
-    char command[BUFFER_SIZE];
+    char buffer[4096] = {0};
+    char message[1024];
 
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("Socket creation error");
+        printf("\n Socket creation error \n");
         return -1;
     }
 
@@ -22,37 +21,38 @@ int main() {
     serv_addr.sin_port = htons(PORT);
 
     if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
-        perror("Invalid address/ Address not supported");
+        printf("\nInvalid address/ Address not supported \n");
         return -1;
     }
 
     if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("Connection Failed");
+        printf("\nConnection Failed \n");
         return -1;
     }
 
-    printf("[+] Connected to Mini Database Server at port 9000\n");
+    printf("Connected to DB Server on port 9000\n");
+    printf("Type HELP for available commands\n");
+    printf("Type EXIT to quit\n");
 
     while (1) {
-        printf("MOO_DB> ");
-        if (fgets(command, BUFFER_SIZE, stdin) == NULL) break;
+        printf("\ndb > ");
+        fgets(message, 1024, stdin);
         
-        command[strcspn(command, "\n")] = 0;
+        message[strcspn(message, "\n")] = 0;
 
-        if (strcmp(command, "exit") == 0) break;
-
-        send(sock, command, strlen(command), 0);
-        
-        memset(buffer, 0, BUFFER_SIZE);
-        int valread = read(sock, buffer, BUFFER_SIZE);
-        if (valread > 0) {
-            printf("%s\n", buffer);
-        } else {
-            printf("[-] Server disconnected\n");
+        if (strcmp(message, "EXIT") == 0) {
             break;
         }
-    }
 
+        send(sock, message, strlen(message), 0);
+        
+        memset(buffer, 0, sizeof(buffer));
+        int valread = read(sock, buffer, 4096);
+        if (valread > 0) {
+            printf("%s\n", buffer);
+        }
+    }
+    
     close(sock);
     return 0;
 }
