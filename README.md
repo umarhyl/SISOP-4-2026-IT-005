@@ -97,7 +97,7 @@ static void get_koordinat_amba(char *buffer) {
 ```
 Fungsi `get_koordinat_amba` bertugas untuk membaca setiap file teks dari `1.txt` hingga `7.txt` di dalam direktori `amba_files`. Program membuka setiap file, mencari baris yang diawali dengan "KOORD: ", lalu mengekstrak bagian koordinat setelah "KOORD: " dan menggabungkannya ke dalam `buffer`. Setelah semua file diproses, `buffer` akan berisi string lengkap yang menyatakan tujuan Mas Amba beserta koordinat yang sudah digabungkan.
 
-5. Proof of Concept:
+5. **Proof of Concept:**
 
 Run FUSE, lalu akses `tujuan.txt` untuk melihat hasilnya
 ![run_fuse](assets/soal_1/1.png)
@@ -113,6 +113,7 @@ FUSE di sini tidak diimplementasikan sebagai pure passthrough, melainkan bertind
 Berikut adalah bagian-bagian penyelesaian Soal 2:
 
 1. **FUSE: Path dan Enkripsi**
+
 Langkah pertama adalah membuat fungsi bantuan pada fuse.c agar proses perubahan nama file (path translasi) dan pengacakan isi file dapat dilakukan secara dinamis.
 
 ```c
@@ -230,7 +231,7 @@ Logikanya program client membuat koneksi ke localhost (`127.0.0.1`) pada port 90
 
 Ketika server merespon instruksi dengan membuat atau memperbarui tabel database di dalam `/app/db`, aktivitas ini akan langsung memicu mekanisme bind mount Docker yang tembus ke folder `fuse_mount` pada sistem host, yang selanjutnya langsung dienkripsi dan disimpan oleh FUSE ke dalam `encrypted_storage`.
 
-5. Proof of Concept:
+5. **Proof of Concept:**
 
 Run FUSE, jalankan Docker
 ![run_fuse&docker](assets/soal_2/1.png)
@@ -240,3 +241,5 @@ Lakukan query database melalui client. Hasilnya, file database yang dibuat di da
 
 Unmount FUSE setelah selesai
 ![unmount_fuse](assets/soal_2/3.png)
+
+# Soal 3 - LibraryIT
