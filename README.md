@@ -37,7 +37,7 @@
 ## Soal 1 - Save Asisten Kenz
 Pada soal nomor 1 diminta untuk mengekstrak pecahan koordinat dari 7 file teks (dari `1.txt` sampai `7.txt`) yang ada di folder `amba_files`. Lalu menggabungkan pecahan-pecahan `KOOR` menjadi satu koordinat utuh yang benar, lalu menyimpannya ke dalam file `tujuan.txt` di folder `mnt`. Ini dilakukan menggunakan FUSE, sehingga file `tujuan.txt` tidak pernah benar-benar ada di disk.
 
-1. `xmp_readdir`
+### 1. `xmp_readdir`
 ```c
 ...
     if (strcmp(path, dirpath) == 0) { 
@@ -47,7 +47,7 @@ Pada soal nomor 1 diminta untuk mengekstrak pecahan koordinat dari 7 file teks (
 ```
 Pada fungsi `xmp_readdir`, program memeriksa apakah path yang diminta adalah direktori root (`/`). Jika benar, maka program menggunakan fungsi `filler()` untuk menambahkan entri `tujuan.txt` ke dalam daftar file yang terlihat oleh pengguna saat mereka melihat isi direktori tersebut. Dengan cara ini, meskipun `tujuan.txt` tidak benar-benar ada di disk, pengguna tetap dapat melihatnya sebagai file yang tersedia.
 
-2. `xmp_getattr`
+### 2. `xmp_getattr`
 ```c
     if (strcmp(path, "/tujuan.txt") == 0) {
         stbuf->st_mode = S_IFREG | 0444; // Regular file, Read-Only
@@ -61,7 +61,7 @@ Pada fungsi `xmp_readdir`, program memeriksa apakah path yang diminta adalah dir
 ```
 Logikanya, ketika ada permintaan atribut untuk `tujuan.txt`, program memanggil fungsi `get_koordinat_amba(content)` untuk mengisi variabel `content` dengan koordinat yang sudah digabungkan. Kemudian, ukuran file (`st_size`) diatur sesuai dengan panjang string `content`, sehingga ketika pengguna mencoba membaca `tujuan.txt`, mereka akan mendapatkan data yang benar-benar berisi koordinat yang sudah diproses.
 
-3. `xmp_read`
+### 3. `xmp_read`
 ```c
     if (strcmp(path, "/tujuan.txt") == 0) {
         char content[2048];
@@ -79,7 +79,7 @@ Logikanya, ketika ada permintaan atribut untuk `tujuan.txt`, program memanggil f
 ```
 Pada fungsi `xmp_read`, ketika pengguna mencoba membaca `tujuan.txt`, program kembali memanggil `get_koordinat_amba(content)` untuk memastikan bahwa data yang dibaca adalah koordinat yang sudah digabungkan. Program kemudian menghitung panjang konten dan menyalin bagian yang sesuai ke buffer `buf` berdasarkan offset dan ukuran yang diminta oleh pengguna. Jika offset melebihi panjang konten, maka ukuran yang dikembalikan adalah 0, menandakan bahwa tidak ada data lagi untuk dibaca.
 
-4. `get_koordinat_amba`
+### 4. `get_koordinat_amba`
 ```c
 static void get_koordinat_amba(char *buffer) {
     strcpy(buffer, "Tujuan Mas Amba: ");
@@ -106,9 +106,9 @@ static void get_koordinat_amba(char *buffer) {
 ```
 Fungsi `get_koordinat_amba` bertugas untuk membaca setiap file teks dari `1.txt` hingga `7.txt` di dalam direktori `amba_files`. Program membuka setiap file, mencari baris yang diawali dengan "KOORD: ", lalu mengekstrak bagian koordinat setelah "KOORD: " dan menggabungkannya ke dalam `buffer`. Setelah semua file diproses, `buffer` akan berisi string lengkap yang menyatakan tujuan Mas Amba beserta koordinat yang sudah digabungkan.
 
-5. **Proof of Concept:**
+### 5. **Proof of Concept & Screenshots** 
 
-Run FUSE, lalu akses `tujuan.txt` untuk melihat hasilnya
+##### Run FUSE, lalu akses `tujuan.txt` untuk melihat hasilnya
 ![run_fuse](assets/soal_1/1.png)
 ![cat_tujuan](assets/soal_1/2.png)
 ![unmount_fuse](assets/soal_1/3.png)
@@ -121,7 +121,7 @@ FUSE di sini tidak diimplementasikan sebagai pure passthrough, melainkan bertind
 
 Berikut adalah bagian-bagian penyelesaian Soal 2:
 
-1. **FUSE: Path dan Enkripsi**
+### 1. **FUSE: Path dan Enkripsi**
 
 Langkah pertama adalah membuat fungsi bantuan pada fuse.c agar proses perubahan nama file (path translasi) dan pengacakan isi file dapat dilakukan secara dinamis.
 
@@ -154,7 +154,7 @@ void make_fpath(char *fpath, const char *path) {
 ```
 Logikanya, program menggunakan fungsi `xor_cipher` untuk mengenkripsi dan mendekripsi data menggunakan operasi XOR dengan kunci `0x76`. Fungsi `make_fpath` bertugas merutekan ulang setiap request path dari `fuse_mount` menuju `encrypted_storage`. Terdapat validasi dengan `lstat()`, jika target merupakan direktori, namanya dibiarkan asli. Namun jika berupa file, namanya akan ditambahkan format `.enc`.
 
-2. **FUSE: Operasi Read dan Write**
+### 2. **FUSE: Operasi Read dan Write**
 ```c
 static int xmp_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
     char fpath[1024];
@@ -192,7 +192,7 @@ static int xmp_write(const char *path, const char *buf, size_t size, off_t offse
 ```
 Ketika ada instruksi penulisan (`xmp_write`), program mencegat data asli yang dikirim oleh pengguna, menyalinnya ke dalam `enc_buf`, lalu mengenkripsinya dengan `xor_cipher()` sebelum fungsi `pwrite()` menyimpannya secara fisik ke dalam memori perangkat. Sebaliknya, ketika pengguna melakukan pembacaan (`xmp_read`), program membaca data tersandi dari memori fisik lalu mengembalikannya ke bentuk semula (plaintext) dengan memanggil kembali `xor_cipher()`.
 
-3. **Containerization Docker & Bind Mount**
+### 3. **Containerization Docker & Bind Mount**
 Server dalam container menggunakan konfigurasi Dockerfile berikut:
 ```Dockerfile
 FROM ubuntu:latest
@@ -212,7 +212,7 @@ docker run -d --name db_app --mount type=bind,source="$(pwd)"/fuse_mount,target=
 fusermount -u fuse_mount/ # unmount FUSE setelah selesai
 ```
 
-4. **Client**
+### 4. **Client**
 ```c
     // ... inisialisasi socket ...
     if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
@@ -240,15 +240,15 @@ Logikanya program client membuat koneksi ke localhost (`127.0.0.1`) pada port 90
 
 Ketika server merespon instruksi dengan membuat atau memperbarui tabel database di dalam `/app/db`, aktivitas ini akan langsung memicu mekanisme bind mount Docker yang tembus ke folder `fuse_mount` pada sistem host, yang selanjutnya langsung dienkripsi dan disimpan oleh FUSE ke dalam `encrypted_storage`.
 
-5. **Proof of Concept:**
+### 5. **Proof of Concept & Screenshots**
 
-Run FUSE, jalankan Docker
+#### Run FUSE, jalankan Docker
 ![run_fuse&docker](assets/soal_2/1.png)
 
-Lakukan query database melalui client. Hasilnya, file database yang dibuat di dalam container akan muncul di `fuse_mount` dengan nama terenkripsi di `encrypted_storage`.
+#### Query database melalui client. Hasilnya, file database yang dibuat di dalam container akan muncul di `fuse_mount` dengan nama terenkripsi di `encrypted_storage`.
 ![db](assets/soal_2/2.png)
 
-Unmount FUSE setelah selesai
+#### Unmount FUSE setelah selesai
 ![unmount_fuse](assets/soal_2/3.png)
 
 # Soal 3 - LibraryIT
